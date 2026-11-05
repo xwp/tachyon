@@ -75,6 +75,34 @@ function isValidColor( value: string ): boolean {
 }
 
 /**
+ * Convert a Photon crop (`x,y,w,h` as percentages or `px` values) to a
+ * pixel region clamped to the image. Returns null if nothing is left.
+ */
+export function getCropRegion(
+	crop: string | string[],
+	imageWidth: number,
+	imageHeight: number
+): { left: number; top: number; width: number; height: number } | null {
+	const values = ( typeof crop === 'string' ? crop.split( ',' ) : crop ).map( ( value, index ) => {
+		if ( value.endsWith( 'px' ) ) {
+			return Number( value.slice( 0, -2 ) );
+		}
+		const dimension = index % 2 === 0 ? imageWidth : imageHeight;
+		return Math.round( dimension * ( Number( value ) / 100 ) );
+	} );
+
+	const left = Math.min( Math.max( values[0], 0 ), imageWidth );
+	const top = Math.min( Math.max( values[1], 0 ), imageHeight );
+	const width = Math.min( values[2], imageWidth - left );
+	const height = Math.min( values[3], imageHeight - top );
+
+	if ( width < 1 || height < 1 ) {
+		return null;
+	}
+	return { left, top, width, height };
+}
+
+/**
  * Get a file from S3/
  */
 export async function getS3File( config: Config, key: string, args: Args ): Promise<GetObjectCommandOutput> {
@@ -174,8 +202,9 @@ export async function resizeBuffer(
 	// check we can get valid metadata
 	const metadata = await image.metadata();
 
-	let width = metadata.width as number;
-	let height = metadata.height as number;
+	// Dimensions after EXIF auto-orientation, which is what crop coordinates refer to.
+	const width = ( metadata.autoOrient?.width ?? metadata.width ) as number;
+	const height = ( metadata.autoOrient?.height ?? metadata.height ) as number;
 
 	// auto rotate based on orientation EXIF data.
 	image.rotate();
@@ -280,10 +309,24 @@ export async function resizeBuffer(
 	// get zoom value
 	const zoom = parseFloat( args.zoom || '1' ) || 1;
 
+	// Crop first, on the source image, as Photon does. `crop=1` is only a
+	// flag for the `w`/`h` center crop below, not a region.
+	let hasCropRegion = false;
+	if ( args.crop && args.crop !== '1' ) {
+		const region = getCropRegion( args.crop as string | string[], width, height );
+		if ( region ) {
+			image.extract( region );
+			hasCropRegion = true;
+		} else {
+			delete args.crop;
+			errors.push( 'crop arg is outside the image' );
+		}
+	}
+
 	// resize
 	if ( args.resize ) {
 		// apply smart crop if available
-		if ( args.crop_strategy === 'smart' && ! args.crop ) {
+		if ( args.crop_strategy === 'smart' && ! hasCropRegion ) {
 			const cropResize = getDimArray( args.resize );
 			const rotatedImage = await image.toBuffer();
 			const result = await smartcrop.crop( rotatedImage, {
@@ -329,44 +372,12 @@ export async function resizeBuffer(
 			withoutEnlargement: true,
 		} );
 	} else if ( args.w || args.h ) {
-		const newWidth = Number(args.w);
-        const aspectRatio = height / width;
-        width = newWidth;
-        height = Math.round(newWidth * aspectRatio);
 		image.resize( {
-			width: newWidth * zoom || undefined,
+			width: Number( args.w ) * zoom || undefined,
 			height: Number( args.h ) * zoom || undefined,
-			fit: args.crop ? 'cover' : 'inside',
+			fit: args.crop === '1' ? 'cover' : 'inside',
 			withoutEnlargement: true,
 		} );
-	}
-
-	// `crop=1` is a flag for the `w`/`h` center crop above, not a region.
-	if (args.crop && args.crop !== '1') {
-		const cropValuesString = typeof args.crop === 'string' ? args.crop.split(',') : args.crop;
-
-		// convert percentages to px values
-		const cropValues = cropValuesString.map((value, index) => {
-			if (value.endsWith('px')) {
-				return Number(value.slice(0, -2));
-			} else {
-				const dimension = index % 2 === 0 ? 'width' : 'height';
-				return Math.round((metadata[dimension] as number) * (Number(value) / 100));
-			}
-		});
-
-		const [x, y, w, h] = cropValues;
-
-		// Ensure crop dimensions don't exceed image boundaries
-		const extractWidth = Math.min(w, width - x);
-		const extractHeight = Math.min(h, height - y);
-
-		image.extract({
-			left: x,
-			top: y,
-			width: extractWidth,
-			height: extractHeight
-		});
 	}
 
 	// set default quality slightly higher than sharp's default
@@ -399,6 +410,7 @@ export async function resizeBuffer(
 		image.toBuffer( async ( err, data, info ) => {
 			if ( err ) {
 				reject( err );
+				return;
 			}
 
 			// add invalid args
