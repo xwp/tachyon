@@ -59,7 +59,7 @@ https://ap-southeast-2.console.aws.amazon.com/lambda/home?region=ap-southeast-2#
 in order to upload the lambda.zip file.
 ### Lambda Function Spec
 
-- **Runtime:** Node.js 18
+- **Runtime:** Node.js 22
 - **Function URL:** Activated
 - **Environment Variables:**
   - `S3_BUCKET=my-bucket`
