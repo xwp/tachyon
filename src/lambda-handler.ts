@@ -1,5 +1,6 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { Buffer } from "buffer";
+import sharp from "sharp";
 import { Args, resizeBuffer, getS3File, Config, parseBooleanArg } from "./lib.js";
 import { URLSearchParams } from "url";
 
@@ -10,6 +11,12 @@ const streamify_handler: StreamifyHandler = async (event, response) => {
     region: region,
     bucket: bucket,
   };
+  if (process.env.S3_ENDPOINT) {
+    config.endpoint = process.env.S3_ENDPOINT;
+  }
+  if (process.env.S3_FORCE_PATH_STYLE) {
+    config.forcePathStyle = true;
+  }
   const key = decodeURIComponent(event.rawPath.substring(1)).replace(
     "/tachyon/",
     "/"
@@ -40,8 +47,8 @@ const streamify_handler: StreamifyHandler = async (event, response) => {
   }
 
   const originalUrl = `${process.env.DOMAIN}/${key}`;
+  const isPresigned = !!args["X-Amz-Algorithm"];
   let buffer: Buffer | undefined;
-  let fetchResponse: Response | undefined;
 
   try {
     const s3Response = await getS3File(config, key, args);
@@ -50,70 +57,118 @@ const streamify_handler: StreamifyHandler = async (event, response) => {
     }
     buffer = Buffer.from(await s3Response.Body.transformToByteArray());
   } catch (error: any) {
-    if (error.Code === "NoSuchKey" || error.Code === "AccessDenied") {
-      try {
-        fetchResponse = await fetch(originalUrl);
-        if (!fetchResponse.ok) {
-          throw new Error(`HTTP error! status: ${fetchResponse.status}`);
-        }
-        buffer = Buffer.from(await fetchResponse.arrayBuffer());
-        const params = {
-          Bucket: bucket,
-          Key: key,
-          Body: buffer,
-        };
-        const command = new PutObjectCommand(params);
-        const s3Client = new S3Client({ region: region });
-        await s3Client.send(command);
-      } catch (e: any) {
-        if (e.message.includes("404") || fetchResponse?.status === 404) {
-          const metadata = {
-            statusCode: 404,
-            headers: {
-              "Content-Type": "text/html",
-            },
-          };
-          response = awslambda.HttpResponseStream.from(response, metadata);
-          response.write("File not found.");
-          response.end();
-          return;
-        }
-        throw e;
-      } finally {
-        fetchResponse = undefined;
+    // AccessDenied also means "missing" when the role cannot list the
+    // bucket. A presigned request that fails must not fall back to the
+    // public origin.
+    const isMissing =
+      error.Code === "NoSuchKey" || error.Code === "AccessDenied";
+    if (!isMissing || isPresigned) {
+      if (isMissing) {
+        return sendText(response, 404, "File not found.");
       }
-    } else {
-      throw error;
+      console.error(error);
+      return sendText(response, 502, "Bad gateway.");
+    }
+
+    let fetchResponse: Response;
+    try {
+      fetchResponse = await fetch(originalUrl);
+    } catch (e) {
+      console.error(e);
+      return sendText(response, 502, "Bad gateway.");
+    }
+    if (fetchResponse.status === 404) {
+      return sendText(response, 404, "File not found.");
+    }
+    if (!fetchResponse.ok) {
+      console.error(`Origin returned ${fetchResponse.status} for ${originalUrl}`);
+      return sendText(response, 502, "Bad gateway.");
+    }
+    buffer = Buffer.from(await fetchResponse.arrayBuffer());
+
+    // Only cache real images, so an origin error page is never stored.
+    if (await isImage(buffer)) {
+      try {
+        const { bucket: _bucket, ...clientConfig } = config;
+        const s3Client = new S3Client(clientConfig);
+        await s3Client.send(
+          new PutObjectCommand({ Bucket: bucket, Key: key, Body: buffer })
+        );
+      } catch (e) {
+        // Caching is best effort; still serve the image.
+        console.error(e);
+      }
     }
   }
 
   try {
-    const { info, data } = await resizeBuffer(buffer!, args);
+    const { info, data } = await resizeBuffer(buffer, args);
     buffer = undefined;
-    const maxAge = 31536000; // 1 year.
     response = awslambda.HttpResponseStream.from(response, {
       statusCode: 200,
       headers: {
-        "Cache-Control": `max-age=${maxAge}`,
+        "Cache-Control": `max-age=${getMaxAge(args)}`,
         "Last-Modified": new Date().toUTCString(),
-        "Content-Type": "image/" + info.format,
+        // sharp reports AVIF output as "heif".
+        "Content-Type": "image/" + (info.format === "heif" ? "avif" : info.format),
       },
     });
     response.write(data);
     response.end();
   } catch (e: any) {
     console.error(e);
-    const metadata = {
-      statusCode: 500,
-      headers: {
-        "Content-Type": "text/html",
-      },
-    };
-    response = awslambda.HttpResponseStream.from(response, metadata);
-    response.write("Internal server error.");
-    response.end();
+    sendText(response, 500, "Internal server error.");
   }
 };
+
+/**
+ * Send a plain text response.
+ */
+function sendText(response: ResponseStream, statusCode: number, body: string): void {
+  response = awslambda.HttpResponseStream.from(response, {
+    statusCode,
+    headers: {
+      "Content-Type": "text/html",
+    },
+  });
+  response.write(body);
+  response.end();
+}
+
+/**
+ * Whether sharp can read a buffer as an image.
+ */
+async function isImage(buffer: Buffer): Promise<boolean> {
+  try {
+    const metadata = await sharp(buffer).metadata();
+    return !!metadata.format;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cache for a year, or until a presigned URL expires.
+ */
+export function getMaxAge(args: Args, now: number = Date.now()): number {
+  const year = 31536000;
+  if (!args["X-Amz-Expires"] || !args["X-Amz-Date"]) {
+    return year;
+  }
+  // X-Amz-Date is YYYYMMDDTHHMMSSZ, which Date cannot parse.
+  const signedAt = Date.parse(
+    args["X-Amz-Date"].replace(
+      /(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/,
+      "$1-$2-$3T$4:$5:$6Z"
+    )
+  );
+  const expiresAt = signedAt / 1000 + Number(args["X-Amz-Expires"]);
+  const maxAge = Math.floor(expiresAt - now / 1000);
+  if (!Number.isFinite(maxAge)) {
+    return 0;
+  }
+  return Math.min(Math.max(maxAge, 0), year);
+}
 
 // Outside Lambda, shim the streaming API. Check the method, not the
 // global: @aws/lambda-invoke-store (an AWS SDK dependency) sets
