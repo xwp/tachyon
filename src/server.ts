@@ -66,5 +66,5 @@ const server = createServer( async ( req: IncomingMessage, res: ServerResponse )
 const port = process.argv.slice( 2 )[0] || 8080;
 
 server.listen( port, () => {
-	console.log( `Server running at http://localhost:${port}/` ); // eslint-disable-line no-console
+	console.log( `Server running at http://localhost:${port}/` );
 } );

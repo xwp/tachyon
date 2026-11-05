@@ -6,7 +6,7 @@
 		"noEmit": false,
 		"sourceMap": true,
 		"module": "commonjs",
-		"moduleResolution": "Node16",
+		"moduleResolution": "node10",
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"forceConsistentCasingInFileNames": true,

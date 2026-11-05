@@ -60,6 +60,7 @@ in order to upload the lambda.zip file.
 ### Lambda Function Spec
 
 - **Runtime:** Node.js 22
+- **Architecture:** arm64 or x86_64. `npm run build` adds sharp's Linux binaries for both CPUs (`scripts/add-sharp-binaries.mjs`), so the same `lambda.zip` runs on either. arm64 is the default in `template.yaml` because it costs less per GB-second.
 - **Function URL:** Activated
 - **Environment Variables:**
   - `S3_BUCKET=my-bucket`
