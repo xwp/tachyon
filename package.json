@@ -15,7 +15,7 @@
 		"function-name": ""
 	},
 	"scripts": {
-		"build": "sam build -u",
+		"build": "sam build -u && node scripts/add-sharp-binaries.mjs",
 		"start": "tsc -w & nodemon --watch dist/lambda-handler.js --exec 'node dist/lambda-handler.js'",
 		"test": "AWS_PROFILE=hmn-test S3_BUCKET=testtachyonbucket S3_REGION=us-east-1 jest",
 		"build-zip": "rm lambda.zip ; cd .aws-sam/build/Tachyon && zip -r --exclude='node_modules/animated-gif-detector/test/*' ../../../lambda.zip ./node_modules/ package.json ./dist/",
