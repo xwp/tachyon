@@ -11,7 +11,7 @@ Resources:
           S3_BUCKET: hmn-uploads
           S3_REGION: us-east-1
           DOMAIN: prod.exmaple.com
-      Runtime: nodejs22.x
+      Runtime: nodejs24.x
       Architectures:
       - arm64
       Events:
