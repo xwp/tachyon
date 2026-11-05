@@ -1,5 +1,5 @@
 import { S3Client, S3ClientConfig, GetObjectCommand, GetObjectCommandOutput } from '@aws-sdk/client-s3';
-import sharp, { OutputInfo, Sharp } from 'sharp';
+import sharp, { FormatEnum, OutputInfo, Sharp } from 'sharp';
 import smartcrop from 'smartcrop-sharp';
 
 export interface Args {
@@ -14,6 +14,10 @@ export interface Args {
 	resize?: string | number[];
 	quality?: string | number;
 	strip?: string;
+	brightness?: string;
+	contrast?: string;
+	colorize?: string;
+	smooth?: string;
 	w?: string;
 	webp?: string | boolean;
 	zoom?: string;
@@ -125,6 +129,109 @@ function applyStrip( image: Sharp, strip: string = 'all' ): void {
 			image.keepExif().keepXmp();
 			break;
 	}
+}
+
+/**
+ * Whether a value is an integer string within a range.
+ */
+function isIntegerInRange( value: string, min: number, max: number ): boolean {
+	return /^-?\d{1,3}$/.test( value ) && Number( value ) >= min && Number( value ) <= max;
+}
+
+/**
+ * A step applied to the colour channels of 8-bit pixels. Each step's
+ * output is clipped to 0-255 before the next, as PHP GD does per filter.
+ */
+type PixelOp =
+	| { type: 'linear'; a: number[]; b: number[] }
+	| { type: 'convolve'; convolution: Convolution };
+
+/**
+ * Photon's brightness, contrast, colorize and smooth args as pixel steps,
+ * in that order. Photon uses PHP GD's imagefilter(), so these copy GD:
+ * - brightness: add the value to each colour channel.
+ * - contrast: scale around mid-grey. GD's sign is inverted, so Photon's
+ *   value c gives the factor ((100 + c) / 100)^2.
+ * - colorize: add r,g,b to the matching channels.
+ * - smooth: 3x3 kernel, centre weight w, divided by 8 + w.
+ */
+function getPixelOps( args: Args ): PixelOp[] {
+	const ops: PixelOp[] = [];
+	if ( args.brightness && Number( args.brightness ) !== 0 ) {
+		const value = Number( args.brightness );
+		ops.push( { type: 'linear', a: [ 1, 1, 1 ], b: [ value, value, value ] } );
+	}
+	if ( args.contrast && Number( args.contrast ) !== 0 ) {
+		const factor = ( ( 100 + Number( args.contrast ) ) / 100 ) ** 2;
+		const offset = 127.5 * ( 1 - factor );
+		ops.push( { type: 'linear', a: [ factor, factor, factor ], b: [ offset, offset, offset ] } );
+	}
+	if ( args.colorize ) {
+		const rgb = args.colorize.split( ',' ).map( Number );
+		if ( rgb.some( value => value !== 0 ) ) {
+			ops.push( { type: 'linear', a: [ 1, 1, 1 ], b: rgb } );
+		}
+	}
+	if ( args.smooth ) {
+		const weight = Number( args.smooth );
+		ops.push( {
+			type: 'convolve',
+			convolution: { width: 3, height: 3, kernel: [ 1, 1, 1, 1, weight, 1, 1, 1, 1 ], scale: 8 + weight, offset: 0 },
+		} );
+	}
+	return ops;
+}
+
+type Convolution = { width: number; height: number; kernel: number[]; scale: number; offset: number };
+
+
+/**
+ * Apply pixel steps to the colour channels of raw 8-bit pixels, one frame
+ * at a time. Alpha is not changed.
+ *
+ * sharp's convolve() also filters alpha, runs across the stacked frames of
+ * an animation, and sharp keeps only one linear() and one convolve() per
+ * pipeline without clipping between them. GD (and so Photon) applies each
+ * filter to colour only and clips after each one.
+ */
+async function applyPixelOps(
+	data: Buffer,
+	width: number,
+	height: number,
+	channels: 1 | 2 | 3 | 4,
+	pageHeight: number,
+	ops: PixelOp[]
+): Promise<Buffer> {
+	const colourBands = ( channels === 2 || channels === 4 ? channels - 1 : channels ) as 1 | 2 | 3 | 4;
+	const frameBytes = width * pageHeight * channels;
+	const out = Buffer.from( data );
+
+	for ( let top = 0; top < height; top += pageHeight ) {
+		const start = ( top / pageHeight ) * frameBytes;
+		let frame = sharp( data.subarray( start, start + frameBytes ), {
+			raw: { width, height: pageHeight, channels },
+			limitInputPixels: false,
+		} );
+		if ( colourBands !== channels ) {
+			frame.removeAlpha();
+		}
+		let pixels = await frame.raw().toBuffer();
+		for ( const op of ops ) {
+			frame = sharp( pixels, { raw: { width, height: pageHeight, channels: colourBands }, limitInputPixels: false } );
+			if ( op.type === 'linear' ) {
+				frame.linear( op.a.slice( 0, colourBands ), op.b.slice( 0, colourBands ) );
+			} else {
+				frame.convolve( op.convolution );
+			}
+			pixels = await frame.raw( { depth: 'uchar' } ).toBuffer();
+		}
+		for ( let pixel = 0; pixel < width * pageHeight; pixel++ ) {
+			for ( let band = 0; band < colourBands; band++ ) {
+				out[start + pixel * channels + band] = pixels[pixel * colourBands + band];
+			}
+		}
+	}
+	return out;
 }
 
 /**
@@ -339,6 +446,33 @@ export async function resizeBuffer(
 	}
 	applyStrip( image, args.strip );
 
+	if ( typeof args.brightness !== 'undefined' ) {
+		if ( ! isIntegerInRange( args.brightness, -255, 255 ) ) {
+			delete args.brightness;
+			errors.push( 'brightness arg is not valid' );
+		}
+	}
+	if ( typeof args.contrast !== 'undefined' ) {
+		if ( ! isIntegerInRange( args.contrast, -100, 100 ) ) {
+			delete args.contrast;
+			errors.push( 'contrast arg is not valid' );
+		}
+	}
+	if ( typeof args.colorize !== 'undefined' ) {
+		const parts = args.colorize.split( ',' );
+		if ( parts.length !== 3 || ! parts.every( part => isIntegerInRange( part, -255, 255 ) ) ) {
+			delete args.colorize;
+			errors.push( 'colorize arg is not valid' );
+		}
+	}
+	if ( typeof args.smooth !== 'undefined' ) {
+		// Photon: values near 2048 or more have little effect, so cap it.
+		if ( ! /^\d{1,5}(\.\d+)?$/.test( args.smooth ) || Number( args.smooth ) > 10000 ) {
+			delete args.smooth;
+			errors.push( 'smooth arg is not valid' );
+		}
+	}
+
 	// get zoom value
 	const zoom = parseFloat( args.zoom || '1' ) || 1;
 
@@ -413,30 +547,92 @@ export async function resizeBuffer(
 		} );
 	}
 
+
 	// set default quality slightly higher than sharp's default
 	if ( ! args.quality ) {
 		args.quality = applyZoomCompression( 82, zoom );
 	}
 
 	// allow override of compression quality
-	if ( args.avif ) {
-		image.avif( {
-			quality: Math.round( clamp( args.quality, 0, 100 ) ),
+	const encode = ( output: Sharp ): Sharp => {
+		if ( args.avif ) {
+			return output.avif( {
+				quality: Math.round( clamp( args.quality!, 0, 100 ) ),
+			} );
+		} else if ( args.webp ) {
+			return output.webp( {
+				quality: Math.round( clamp( args.quality!, 0, 100 ) ),
+			} );
+		} else if ( metadata.format === 'jpeg' ) {
+			return output.jpeg( {
+				quality: Math.round( clamp( args.quality!, 0, 100 ) ),
+			} );
+		} else if ( metadata.format === 'png' ) {
+			// Compress the PNG.
+			return output.png( {
+				palette: true,
+			} );
+		}
+		return output;
+	};
+
+	const pixelOps = getPixelOps( args );
+	if ( pixelOps.length ) {
+		// Stage 1: everything else, as raw 8-bit sRGB pixels. sRGB gives
+		// greyscale input three bands for colorize, and converts CMYK and
+		// 16-bit input through the normal colour management. Stage 2: the
+		// pixel steps per frame and colour only, then encode.
+		const sourceFormat = metadata.format as keyof FormatEnum;
+		const raw = await image.toColourspace( 'srgb' ).raw( { depth: 'uchar' } ).toBuffer( { resolveWithObject: true } );
+		const pageHeight = raw.info.pageHeight ?? raw.info.height;
+		const processed = await applyPixelOps(
+			raw.data,
+			raw.info.width,
+			raw.info.height,
+			raw.info.channels,
+			pageHeight,
+			pixelOps
+		);
+		const output = sharp( processed, {
+			limitInputPixels: false,
+			raw: {
+				width: raw.info.width,
+				height: raw.info.height,
+				channels: raw.info.channels,
+				pageHeight,
+			},
 		} );
-	} else if ( args.webp ) {
-		image.webp( {
-			quality: Math.round( clamp( args.quality, 0, 100 ) ),
-		} );
-	} else if ( metadata.format === 'jpeg' ) {
-		image.jpeg( {
-			quality: Math.round( clamp( args.quality, 0, 100 ) ),
-		} );
-	} else if ( metadata.format === 'png' ) {
-		// Compress the PNG.
-		image.png( {
-			palette: true,
-		} );
+		// Raw pixels carry no metadata, so this output is always stripped.
+		if ( args.strip && args.strip !== 'all' ) {
+			errors.push( 'strip is not supported with brightness, contrast, colorize or smooth' );
+		}
+		const animation = pageHeight !== raw.info.height ? { loop: metadata.loop, delay: metadata.delay } : {};
+		if ( ! args.avif && ! args.webp && ! [ 'jpeg', 'png' ].includes( metadata.format ?? '' ) ) {
+			// Match the format sharp picks when no format is set. Raw input
+			// has no source format, so it must be set here.
+			if ( sourceFormat === 'heif' ) {
+				// AVIF is the HEIF variant sharp can encode.
+				output.avif();
+			} else if ( [ 'gif', 'webp', 'tiff' ].includes( sourceFormat ) ) {
+				output.toFormat( sourceFormat, animation );
+			} else {
+				// e.g. svg, which sharp writes as png.
+				output.png();
+			}
+		} else if ( args.webp ) {
+			output.webp( animation );
+		}
+		const { data, info } = await encode( output ).toBuffer( { resolveWithObject: true } );
+		return {
+			data,
+			info: {
+				...info,
+				errors: errors.join( ';' ),
+			},
+		};
 	}
+
+	encode( image );
 
 	// send image
 	return new Promise( ( resolve, reject ) => {
