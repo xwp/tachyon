@@ -18,6 +18,8 @@ export interface Args {
 	contrast?: string;
 	colorize?: string;
 	smooth?: string;
+	filter?: string;
+	ulb?: string;
 	w?: string;
 	webp?: string | boolean;
 	zoom?: string;
@@ -144,16 +146,35 @@ function isIntegerInRange( value: string, min: number, max: number ): boolean {
  */
 type PixelOp =
 	| { type: 'linear'; a: number[]; b: number[] }
+	| { type: 'recomb'; matrix: [ number, number, number ][] }
 	| { type: 'convolve'; convolution: Convolution };
 
 /**
- * Photon's brightness, contrast, colorize and smooth args as pixel steps,
- * in that order. Photon uses PHP GD's imagefilter(), so these copy GD:
+ * 3x3 convolution kernels for Photon filters, copied from PHP GD's
+ * imagefilter(), which Photon uses. blurselective has no exact sharp
+ * equivalent (GD blurs only where neighbours are similar), so it is a
+ * light blur that keeps more of each pixel.
+ */
+const FILTER_KERNELS: Record<string, Omit<Convolution, 'width' | 'height'>> = {
+	edgedetect: { kernel: [ -1, 0, -1, 0, 4, 0, -1, 0, -1 ], scale: 1, offset: 127 },
+	emboss: { kernel: [ 1.5, 0, 0, 0, 0, 0, 0, 0, -1.5 ], scale: 1, offset: 127 },
+	meanremoval: { kernel: [ -1, -1, -1, -1, 9, -1, -1, -1, -1 ], scale: 1, offset: 0 },
+	blurgaussian: { kernel: [ 1, 2, 1, 2, 4, 2, 1, 2, 1 ], scale: 16, offset: 0 },
+	blurselective: { kernel: [ 1, 1, 1, 1, 8, 1, 1, 1, 1 ], scale: 16, offset: 0 },
+};
+
+const LUMINANCE: [ number, number, number ] = [ 0.299, 0.587, 0.114 ];
+
+/**
+ * Photon's brightness, contrast, colorize, smooth and filter args as pixel
+ * steps, in that order. Photon uses PHP GD's imagefilter(), so these copy GD:
  * - brightness: add the value to each colour channel.
  * - contrast: scale around mid-grey. GD's sign is inverted, so Photon's
  *   value c gives the factor ((100 + c) / 100)^2.
  * - colorize: add r,g,b to the matching channels.
  * - smooth: 3x3 kernel, centre weight w, divided by 8 + w.
+ * - filter: negate inverts, grayscale uses luminance, sepia is grayscale
+ *   then colorize 100,50,0, and the rest are the 3x3 FILTER_KERNELS.
  */
 function getPixelOps( args: Args ): PixelOp[] {
 	const ops: PixelOp[] = [];
@@ -178,6 +199,24 @@ function getPixelOps( args: Args ): PixelOp[] {
 			type: 'convolve',
 			convolution: { width: 3, height: 3, kernel: [ 1, 1, 1, 1, weight, 1, 1, 1, 1 ], scale: 8 + weight, offset: 0 },
 		} );
+	}
+	switch ( args.filter ) {
+		case 'negate':
+			ops.push( { type: 'linear', a: [ -1, -1, -1 ], b: [ 255, 255, 255 ] } );
+			break;
+		case 'grayscale':
+			ops.push( { type: 'recomb', matrix: [ LUMINANCE, LUMINANCE, LUMINANCE ] } );
+			break;
+		case 'sepia':
+			ops.push( { type: 'recomb', matrix: [ LUMINANCE, LUMINANCE, LUMINANCE ] } );
+			ops.push( { type: 'linear', a: [ 1, 1, 1 ], b: [ 100, 50, 0 ] } );
+			break;
+		default: {
+			const kernel = args.filter ? FILTER_KERNELS[args.filter] : undefined;
+			if ( kernel ) {
+				ops.push( { type: 'convolve', convolution: { width: 3, height: 3, ...kernel } } );
+			}
+		}
 	}
 	return ops;
 }
@@ -220,6 +259,8 @@ async function applyPixelOps(
 			frame = sharp( pixels, { raw: { width, height: pageHeight, channels: colourBands }, limitInputPixels: false } );
 			if ( op.type === 'linear' ) {
 				frame.linear( op.a.slice( 0, colourBands ), op.b.slice( 0, colourBands ) );
+			} else if ( op.type === 'recomb' ) {
+				frame.recomb( op.matrix as [ [ number, number, number ], [ number, number, number ], [ number, number, number ] ] );
 			} else {
 				frame.convolve( op.convolution );
 			}
@@ -335,8 +376,8 @@ export async function resizeBuffer(
 	const metadata = await image.metadata();
 
 	// Dimensions after EXIF auto-orientation, which is what crop coordinates refer to.
-	const width = ( metadata.autoOrient?.width ?? metadata.width ) as number;
-	const height = ( metadata.autoOrient?.height ?? metadata.height ) as number;
+	let width = ( metadata.autoOrient?.width ?? metadata.width ) as number;
+	let height = ( metadata.autoOrient?.height ?? metadata.height ) as number;
 
 	// auto rotate based on orientation EXIF data.
 	image.rotate();
@@ -473,8 +514,40 @@ export async function resizeBuffer(
 		}
 	}
 
+	if ( typeof args.filter !== 'undefined' ) {
+		if ( ! Object.prototype.hasOwnProperty.call( FILTER_KERNELS, args.filter ) && ! /^(negate|grayscale|sepia)$/.test( args.filter ) ) {
+			delete args.filter;
+			errors.push( 'filter arg is not valid' );
+		}
+	}
+	if ( typeof args.ulb !== 'undefined' ) {
+		if ( args.ulb !== 'true' ) {
+			delete args.ulb;
+			errors.push( 'ulb arg is not valid' );
+		}
+	}
+
 	// get zoom value
 	const zoom = parseFloat( args.zoom || '1' ) || 1;
+
+	// Remove a black letterbox. sharp runs trim before extract, so crop
+	// coordinates refer to the trimmed image. Measure it so the crop is
+	// clamped to the right size.
+	if ( args.ulb && ( width < 3 || height < 3 ) ) {
+		// sharp cannot trim images smaller than 3x3; there is no letterbox.
+		delete args.ulb;
+	}
+	if ( args.ulb && ( metadata.pages ?? 1 ) > 1 ) {
+		// sharp cannot trim multi-page (animated) images.
+		delete args.ulb;
+		errors.push( 'ulb is not supported for animated images' );
+	}
+	if ( args.ulb ) {
+		image.trim( { background: '#000000', threshold: 10 } );
+		const { info } = await image.clone().raw().toBuffer( { resolveWithObject: true } );
+		width = info.width;
+		height = info.pageHeight ?? info.height;
+	}
 
 	// Crop first, on the source image, as Photon does. `crop=1` is only a
 	// flag for the `w`/`h` center crop below, not a region.
@@ -604,7 +677,7 @@ export async function resizeBuffer(
 		} );
 		// Raw pixels carry no metadata, so this output is always stripped.
 		if ( args.strip && args.strip !== 'all' ) {
-			errors.push( 'strip is not supported with brightness, contrast, colorize or smooth' );
+			errors.push( 'strip is not supported with brightness, contrast, colorize, smooth or filter' );
 		}
 		const animation = pageHeight !== raw.info.height ? { loop: metadata.loop, delay: metadata.delay } : {};
 		if ( ! args.avif && ! args.webp && ! [ 'jpeg', 'png' ].includes( metadata.format ?? '' ) ) {

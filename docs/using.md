@@ -28,3 +28,14 @@ It's really that simple!
 |`contrast`|Number, -100 to 100|Moves colours away from (positive) or toward (negative) mid-grey. `-100` is flat grey. Default `0`.|
 |`colorize`|String, "r,g,b"|Adds the values (-255 to 255) to the red, green and blue channels, e.g. `colorize=100,0,0`.|
 |`smooth`|Number, 0-10000|Smooths the image with a 3x3 kernel. The value is the centre weight: `0` is the strongest smoothing, and values near 2048 have little effect.|
+|`filter`|String|Applies one filter: `negate`, `grayscale`, `sepia`, `edgedetect`, `emboss`, `blurgaussian`, `blurselective` or `meanremoval`. These use the same 3x3 kernels as Photon (PHP GD), applied to each animation frame and to colour only, so transparency is kept. `blurselective` is an approximation: a light blur that keeps more of each pixel.|
+|`ulb`|`true`|Removes a black letterbox from the image. It runs before `crop`, so crop coordinates refer to the image without the letterbox.|
+
+## Photon compatibility
+
+Tachyon supports the [Photon (Site Accelerator) API](https://developer.wordpress.com/docs/developer-tools/site-accelerator-api/) args above. These Photon args are not supported:
+
+- `allow_lossy`: Tachyon always serves WebP unless `original` or `webp=0` is passed.
+- `ssl`: Jetpack removes it before building the URL, so Tachyon does not need it.
+
+Tachyon applies args in a fixed order, not in URL order: `ulb`, `crop`, then one of `resize`, `fit`, `lb` or `w`/`h`, then `brightness`, `contrast`, `colorize`, `smooth` and `filter`, each clipped to 0-255 before the next.
