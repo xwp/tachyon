@@ -60,6 +60,7 @@ in order to upload the lambda.zip file.
 ### Lambda Function Spec
 
 - **Runtime:** Node.js 22
+- **Architecture:** arm64. The zip contains sharp binaries for the architecture in `template.yaml`, so the function must use the same one. To build for x86_64, set `Architectures` to `x86_64` in `template.yaml` before `npm run build`.
 - **Function URL:** Activated
 - **Environment Variables:**
   - `S3_BUCKET=my-bucket`

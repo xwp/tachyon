@@ -14,8 +14,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22.x
       - run: npm install
@@ -23,13 +23,18 @@ jobs:
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
+      # template.yaml targets arm64, so sam build -u runs an arm64 build
+      # container. Register QEMU so it runs on the x86_64 runner.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - run: npm run build
       - run: npm run build-zip
       - uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: lambda.zip
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         if: github.event_name == 'pull_request'
         with:
           path: lambda.zip

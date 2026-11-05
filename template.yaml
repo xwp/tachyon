@@ -13,7 +13,7 @@ Resources:
           DOMAIN: prod.exmaple.com
       Runtime: nodejs22.x
       Architectures:
-      - x86_64
+      - arm64
       Events:
         Api:
           Type: Api

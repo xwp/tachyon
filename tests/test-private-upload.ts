@@ -9,7 +9,7 @@ import { Args } from '../src/lib';
 /**
  * Presign a URL for a given key.
  * @param key
- * @returns {Promise<Args>} The presigned params
+ * @returns The presigned params
  */
 async function getPresignedUrlParams( key: string ) : Promise<Args> {
 	const client = new S3Client( {
@@ -26,7 +26,7 @@ async function getPresignedUrlParams( key: string ) : Promise<Args> {
 	/**
 	 * Middleware to remove the x-id query string param form the GetObject call.
 	 */
-	const middleware: MiddlewareType<any, any> = ( next: any, context: any ) => async ( args: any ) => {
+	const middleware: MiddlewareType<any, any> = ( next: any, _context: any ) => async ( args: any ) => {
 		const { request } = args;
 		delete request.query['x-id'];
 		return next( args );
@@ -71,7 +71,7 @@ test( 'Test get private upload', async () => {
 		/**
 		 * Write data to the response.
 		 */
-		write( stream: string | Buffer ): void {
+		write( _stream: string | Buffer ): void {
 		},
 		/**
 		 * End the response.
@@ -115,7 +115,7 @@ test( 'Test get private upload with presign params', async () => {
 		/**
 		 * Write data to the response.
 		 */
-		write( stream: string | Buffer ): void {
+		write( _stream: string | Buffer ): void {
 		},
 		/**
 		 * End the response.

@@ -41,7 +41,7 @@ export type Config = S3ClientConfig & { bucket: string };
  * Get the dimensions from a string or array of strings.
  */
 function getDimArray( dims: string | number[], zoom: number = 1 ): ( number | null )[] {
-	let dimArr = typeof dims === 'string' ? dims.split( ',' ) : dims;
+	const dimArr = typeof dims === 'string' ? dims.split( ',' ) : dims;
 	return dimArr.map( v => Math.round( Number( v ) * zoom ) || null );
 }
 
@@ -307,7 +307,7 @@ export async function getS3File( config: Config, key: string, args: Args ): Prom
 					// Signed by @aws-sdk/s3-request-presigner >= ~3.730.
 					'x-amz-checksum-mode',
 				] as const;
-				const presignedParams: { [K in ( typeof presignedParamNames )[number]]?: string } = {}; // eslint-disable-line no-unused-vars
+				const presignedParams: { [K in ( typeof presignedParamNames )[number]]?: string } = {};  
 				const signedHeaders = ( args['X-Amz-SignedHeaders']?.split( ';' ) || [] ).map( header => header.toLowerCase().trim() );
 
 				for ( const paramName of presignedParamNames ) {
