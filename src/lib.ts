@@ -46,6 +46,35 @@ function clamp( val: number | string, min: number, max: number ): number {
 }
 
 /**
+ * Whether a query arg value is a boolean flag (Photon uses 1/0/true/false).
+ */
+export function isBooleanArg( value: unknown ): boolean {
+	return typeof value === 'boolean' || /^(0|1|true|false)$/i.test( String( value ) );
+}
+
+/**
+ * Parse a boolean query arg. An empty value (e.g. `?original`) counts as true.
+ */
+export function parseBooleanArg( value: unknown ): boolean {
+	if ( typeof value === 'boolean' ) {
+		return value;
+	}
+	return ! /^(0|false)$/i.test( String( value ) );
+}
+
+/**
+ * Whether sharp can parse a colour, e.g. `red`, `#fff` or `#ff0000`.
+ */
+function isValidColor( value: string ): boolean {
+	try {
+		sharp().resize( { width: 1, background: value } );
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Get a file from S3/
  */
 export async function getS3File( config: Config, key: string, args: Args ): Promise<GetObjectCommandOutput> {
@@ -167,11 +196,9 @@ export async function resizeBuffer(
 		}
 	}
 	if ( args.quality ) {
-		if (
-			! /^[0-9]{1,3}$/.test( args.quality as string ) ||
-			( args.quality as number ) < 0 ||
-			( args.quality as number ) > 100
-		) {
+		const quality = Number( args.quality );
+		// Photon accepts 10-100.
+		if ( ! /^\d{1,3}$/.test( String( args.quality ) ) || quality < 10 || quality > 100 ) {
 			delete args.quality;
 			errors.push( 'quality arg is not valid' );
 		}
@@ -201,25 +228,38 @@ export async function resizeBuffer(
 		}
 	}
 	if ( args.crop ) {
-		if ( ! /^\d+(px)?,\d+(px)?,\d+(px)?,\d+(px)?$/.test( args.crop as string ) ) {
+		if ( isBooleanArg( args.crop ) ) {
+			// Photon's `crop=1` with `w` and `h` means a center crop to that box.
+			if ( parseBooleanArg( args.crop ) ) {
+				args.crop = '1';
+			} else {
+				delete args.crop;
+			}
+		} else if ( ! /^(\d+px|\d+(\.\d+)?)(,(\d+px|\d+(\.\d+)?)){3}$/.test( args.crop as string ) ) {
+			// Pixel values must be integers; percentages may be fractional.
 			delete args.crop;
 			errors.push( 'crop arg is not valid' );
 		}
 	}
 	if ( args.zoom ) {
-		if ( ! /^\d+(\.\d+)?$/.test( args.zoom ) ) {
+		// Photon accepts 1-10.
+		if ( ! /^\d+(\.\d+)?$/.test( args.zoom ) || Number( args.zoom ) < 1 || Number( args.zoom ) > 10 ) {
 			delete args.zoom;
 			errors.push( 'zoom arg is not valid' );
 		}
 	}
-	if ( args.webp ) {
-		if ( ! /^0|1|true|false$/.test( args.webp as string ) ) {
+	if ( typeof args.webp !== 'undefined' ) {
+		if ( isBooleanArg( args.webp ) ) {
+			args.webp = parseBooleanArg( args.webp );
+		} else {
 			delete args.webp;
 			errors.push( 'webp arg is not valid' );
 		}
 	}
-	if ( args.avif ) {
-		if ( ! /^0|1|true|false$/.test( args.avif as string ) ) {
+	if ( typeof args.avif !== 'undefined' ) {
+		if ( isBooleanArg( args.avif ) ) {
+			args.avif = parseBooleanArg( args.avif );
+		} else {
 			delete args.avif;
 			errors.push( 'avif arg is not valid' );
 		}
@@ -231,7 +271,7 @@ export async function resizeBuffer(
 		}
 	}
 	if ( args.background ) {
-		if ( ! /^#[a-f0-9]{3}[a-f0-9]{3}?$/.test( args.background ) ) {
+		if ( ! isValidColor( args.background ) ) {
 			delete args.background;
 			errors.push( 'background arg is not valid' );
 		}
@@ -301,7 +341,8 @@ export async function resizeBuffer(
 		} );
 	}
 
-	if (args.crop) {
+	// `crop=1` is a flag for the `w`/`h` center crop above, not a region.
+	if (args.crop && args.crop !== '1') {
 		const cropValuesString = typeof args.crop === 'string' ? args.crop.split(',') : args.crop;
 
 		// convert percentages to px values
