@@ -107,8 +107,12 @@ const streamify_handler: StreamifyHandler = async (event, response) => {
   }
 };
 
-if (typeof awslambda === "undefined") {
+// Outside Lambda, shim the streaming API. Check the method, not the
+// global: @aws/lambda-invoke-store (an AWS SDK dependency) sets
+// `globalThis.awslambda = {}` at import time.
+if (typeof globalThis.awslambda?.streamifyResponse !== "function") {
   global.awslambda = {
+    ...globalThis.awslambda,
     streamifyResponse(handler: StreamifyHandler): StreamifyHandler {
       return handler;
     },
