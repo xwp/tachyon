@@ -1,5 +1,5 @@
 import { S3Client, S3ClientConfig, GetObjectCommand, GetObjectCommandOutput } from '@aws-sdk/client-s3';
-import sharp from 'sharp';
+import sharp, { OutputInfo } from 'sharp';
 import smartcrop from 'smartcrop-sharp';
 
 export interface Args {
@@ -25,6 +25,7 @@ export interface Args {
 	'X-Amz-Signature'?: string;
 	'X-Amz-Date'?: string;
 	'X-Amz-Security-Token'?: string;
+	'x-amz-checksum-mode'?: string;
 }
 
 export type Config = S3ClientConfig & { bucket: string };
@@ -50,6 +51,11 @@ function clamp( val: number | string, min: number, max: number ): number {
 export async function getS3File( config: Config, key: string, args: Args ): Promise<GetObjectCommandOutput> {
 	const s3 = new S3Client( {
 		...config,
+		// Opt out of default integrity protection (WHEN_SUPPORTED, added in
+		// @aws-sdk/client-s3 ~3.730). The auto-added checksum headers/query
+		// params break our reuse of the caller's presigned signature below.
+		requestChecksumCalculation: 'WHEN_REQUIRED',
+		responseChecksumValidation: 'WHEN_REQUIRED',
 		signer: {
 			/**
 			 *
@@ -68,6 +74,8 @@ export async function getS3File( config: Config, key: string, args: Args ): Prom
 					'X-Amz-Signature',
 					'X-Amz-Date',
 					'X-Amz-Security-Token',
+					// Signed by @aws-sdk/s3-request-presigner >= ~3.730.
+					'x-amz-checksum-mode',
 				] as const;
 				const presignedParams: { [K in ( typeof presignedParamNames )[number]]?: string } = {}; // eslint-disable-line no-unused-vars
 				const signedHeaders = ( args['X-Amz-SignedHeaders']?.split( ';' ) || [] ).map( header => header.toLowerCase().trim() );
@@ -116,7 +124,7 @@ function applyZoomCompression( defaultValue: number, zoom: number ): number {
 
 type ResizeBufferResult = {
 	data: Buffer;
-	info: sharp.OutputInfo & {
+	info: OutputInfo & {
 		errors: string;
 	}
 };
@@ -129,7 +137,7 @@ export async function resizeBuffer(
 	args: Args
 ): Promise<ResizeBufferResult> {
 	const image = sharp( buffer, {
-		failOnError: false,
+		failOn: 'none',
 		animated: true,
 		limitInputPixels: false,
 	} ).withMetadata();
