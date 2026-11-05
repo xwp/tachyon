@@ -24,3 +24,7 @@ It's really that simple!
 |`lb`|String, "w,h"|Add letterboxing effect to images, by scaling them to width, height while maintaining the aspect ratio and filling the rest with black or `background`.|
 |`background`|String|Background colour for `lb`, as a name (`red`) or hex value (`%23ff0000`, `%23fff`). Escape `#` as `%23`.|
 |`strip`|String, "all", "none", "info", "color"|Controls metadata in the output. `all` (default) removes EXIF, IPTC, XMP and the colour profile after converting to sRGB. `none` keeps everything. `info` keeps only the colour profile. `color` keeps EXIF and XMP but removes the colour profile. EXIF orientation is always applied to the pixels first.|
+|`brightness`|Number, -255 to 255|Adds the value to each colour channel. `-255` is black, `255` is white. Default `0`.|
+|`contrast`|Number, -100 to 100|Moves colours away from (positive) or toward (negative) mid-grey. `-100` is flat grey. Default `0`.|
+|`colorize`|String, "r,g,b"|Adds the values (-255 to 255) to the red, green and blue channels, e.g. `colorize=100,0,0`.|
+|`smooth`|Number, 0-10000|Smooths the image with a 3x3 kernel. The value is the centre weight: `0` is the strongest smoothing, and values near 2048 have little effect.|
