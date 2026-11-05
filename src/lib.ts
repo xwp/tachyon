@@ -1,5 +1,5 @@
 import { S3Client, S3ClientConfig, GetObjectCommand, GetObjectCommandOutput } from '@aws-sdk/client-s3';
-import sharp, { OutputInfo } from 'sharp';
+import sharp, { OutputInfo, Sharp } from 'sharp';
 import smartcrop from 'smartcrop-sharp';
 
 export interface Args {
@@ -13,6 +13,7 @@ export interface Args {
 	lb?: string;
 	resize?: string | number[];
 	quality?: string | number;
+	strip?: string;
 	w?: string;
 	webp?: string | boolean;
 	zoom?: string;
@@ -100,6 +101,30 @@ export function getCropRegion(
 		return null;
 	}
 	return { left, top, width, height };
+}
+
+/**
+ * Apply Photon's `strip` arg. Orientation is always applied to the pixels
+ * first (see `rotate()`), so no mode keeps the EXIF orientation tag.
+ *
+ * - `all` (default): remove EXIF, XMP, IPTC and the ICC profile. sharp
+ *   converts the pixels to sRGB first, so colours stay correct.
+ * - `none`: keep all metadata.
+ * - `info`: remove EXIF, XMP and IPTC, keep the ICC colour profile.
+ * - `color`: keep EXIF and XMP, remove the ICC colour profile.
+ */
+function applyStrip( image: Sharp, strip: string = 'all' ): void {
+	switch ( strip ) {
+		case 'none':
+			image.keepMetadata();
+			break;
+		case 'info':
+			image.keepIccProfile();
+			break;
+		case 'color':
+			image.keepExif().keepXmp();
+			break;
+	}
 }
 
 /**
@@ -197,7 +222,7 @@ export async function resizeBuffer(
 		failOn: 'none',
 		animated: true,
 		limitInputPixels: false,
-	} ).withMetadata();
+	} );
 
 	// check we can get valid metadata
 	const metadata = await image.metadata();
@@ -305,6 +330,14 @@ export async function resizeBuffer(
 			errors.push( 'background arg is not valid' );
 		}
 	}
+
+	if ( typeof args.strip !== 'undefined' ) {
+		if ( ! /^(all|none|info|color)$/.test( args.strip ) ) {
+			delete args.strip;
+			errors.push( 'strip arg is not valid' );
+		}
+	}
+	applyStrip( image, args.strip );
 
 	// get zoom value
 	const zoom = parseFloat( args.zoom || '1' ) || 1;

@@ -23,3 +23,4 @@ It's really that simple!
 |`original`|Boolean, 1|Keep the source format and skip WebP. `original=0` has no effect.|
 |`lb`|String, "w,h"|Add letterboxing effect to images, by scaling them to width, height while maintaining the aspect ratio and filling the rest with black or `background`.|
 |`background`|String|Background colour for `lb`, as a name (`red`) or hex value (`%23ff0000`, `%23fff`). Escape `#` as `%23`.|
+|`strip`|String, "all", "none", "info", "color"|Controls metadata in the output. `all` (default) removes EXIF, IPTC, XMP and the colour profile after converting to sRGB. `none` keeps everything. `info` keeps only the colour profile. `color` keeps EXIF and XMP but removes the colour profile. EXIF orientation is always applied to the pixels first.|
