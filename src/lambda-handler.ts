@@ -1,6 +1,6 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { Buffer } from "buffer";
-import { Args, resizeBuffer, getS3File, Config } from "./lib.js";
+import { Args, resizeBuffer, getS3File, Config, parseBooleanArg } from "./lib.js";
 import { URLSearchParams } from "url";
 
 const streamify_handler: StreamifyHandler = async (event, response) => {
@@ -18,10 +18,18 @@ const streamify_handler: StreamifyHandler = async (event, response) => {
     "X-Amz-Expires"?: string;
     presign?: string;
     key: string;
-    original?: boolean;
+    original?: string;
   };
   args.key = key;
-  args.webp = args.original ? false : true;
+  const original =
+    typeof args.original !== "undefined" && parseBooleanArg(args.original);
+  // Serve WebP by default. `original` forces the source format, and an
+  // explicit `webp` arg is respected and validated in resizeBuffer.
+  if (original) {
+    args.webp = false;
+  } else if (typeof args.webp === "undefined") {
+    args.webp = true;
+  }
   // If there is a presign param, we need to decode it and add it to the args.
   if (args.presign) {
     const presignArgs = new URLSearchParams(args.presign);
